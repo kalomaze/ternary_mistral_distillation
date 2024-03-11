@@ -56,10 +56,10 @@ target_model.to(device)
 
 # Set the training hyperparameters
 num_epochs = 1
-batch_size = 1
-learning_rate = 0.000000000000000001  # Define the starting learning rate
+batch_size = 2
+learning_rate = 0.1 # Define the starting learning rate
 context_size = 4096
-num_samples_per_epoch = 1000  # Manually specify the number of samples to generate per epoch
+num_samples_per_epoch = 5000  # Manually specify the number of samples to generate per epoch
 num_training_steps = num_epochs * num_samples_per_epoch  # Total number of samples to process
 
 # Define the optimizer
@@ -82,24 +82,39 @@ class TernaryLinear(torch.nn.Linear):
 # Quantize the target model and freeze weights except for MLPs and attention
 def quantize_model(model, use_ternary_layer):
     for name, module in model.named_children():
+        print(f"Processing layer: {name}")  # Print the name of the current layer
         if isinstance(module, torch.nn.Linear):
-            if use_ternary_layer:
-                ternary_linear = TernaryLinear(module.in_features, module.out_features).to(device)
-                ternary_linear.weight.data = module.weight.data.to(device)
+            if name == "lm_head":
+                # Keep lm_head as a regular Linear layer with frozen weights
+                print(f"Keeping layer {name} as a regular Linear layer with frozen weights")
+                setattr(model, name, module)
+                module.weight.requires_grad = False
             else:
-                ternary_linear = torch.nn.Linear(module.in_features, module.out_features).to(device)
-                ternary_linear.weight.data = module.weight.data.to(device)
-            if "mlp" in name or "self_attn" in name:
-                ternary_linear.weight.requires_grad = True
-            else:
-                ternary_linear.weight.requires_grad = False
-            setattr(model, name, ternary_linear)
+                if use_ternary_layer:
+                    ternary_linear = TernaryLinear(module.in_features, module.out_features).to(device)
+                    ternary_linear.weight.data = module.weight.data.to(device)
+                    # Ternary layers are trainable by default
+                    ternary_linear.weight.requires_grad = True
+                    setattr(model, name, ternary_linear)
+                else:
+                    # Keep the original module
+                    setattr(model, name, module)
+                
+                # Freeze weights by default
+                module.weight.requires_grad = False
+                
+                # Check if the layer name contains any of the specified strings
+                if any(substr in name for substr in ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj", "mlp"]):
+                    print(f"Condition met for layer {name}")  # Add this line
+                    module.weight.requires_grad = True
+                    print(f"Adding layer {name} for MLP/Attention")
         else:
             quantize_model(module, use_ternary_layer)
     return model
 
+
 # Set the boolean flag to control whether to use the ternary layer or not
-use_ternary_layer = False
+use_ternary_layer = True
 
 # Quantize the target model
 quantized_target_model = quantize_model(target_model, use_ternary_layer)
@@ -124,7 +139,7 @@ for epoch in range(num_epochs):
         target_logits = target_outputs.logits
 
         # Compute loss
-        loss = torch.mean(torch.abs(target_logits.view(-1, target_logits.size(-1)) - source_logits.view(-1, source_logits.size(-1))))
+        loss = torch.mean((target_logits.view(-1, target_logits.size(-1)) - source_logits.view(-1, source_logits.size(-1))) ** 2)
 
         # Backward pass and optimization step
         optimizer.zero_grad()
